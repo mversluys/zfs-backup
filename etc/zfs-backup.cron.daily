@@ -1,0 +1,2 @@
+#!/bin/sh
+exec zfs-backup 

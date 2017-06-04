@@ -1,0 +1,56 @@
+#!/usr/bin/python3
+
+import subprocess
+import re
+import syslog
+from itertools import tee
+
+def pairwise(iterable):
+	a, b = tee(iterable)
+	next(b, None)
+	return zip(a, b)
+
+def backup(filesystem):
+	# get a list of snapshots
+	snapshots = subprocess.Popen('zfs list -H -t snapshot -s name -o name', shell = True, stdout = subprocess.PIPE).stdout
+
+	sources = []
+	backups = []
+
+	# look for daily snapshots of the given filesystem
+	# and look for backup snapshots 
+	for snapshot in snapshots:
+		snapshot = snapshot.rstrip().decode("utf-8")
+		if re.search('^%s.*daily' % filesystem, snapshot):
+			sources.append(snapshot)
+		match = re.search('^backup/(%s.*daily.*)' % filesystem, snapshot)
+		if match:
+			backups.append(match.group(1))
+
+	# if there are no snapshots, we're done
+	if len(sources) == 0:
+		return
+
+	# if there are no backup snapshots, send the first snapshot
+	if len(backups) == 0:
+		initial = sources[0]	
+		syslog.syslog('zfs-backup initial %s', initial) 
+		process = subprocess.Popen('zfs send %s | zfs recv backup/%s' % (initial, filesystem), shell = True, stdout = subprocess.PIPE)
+		result = process.wait()
+		if result:
+			syslog.syslog(syslog.LOG_ERR, 'zfs-backup failed with result %s' % result)
+			syslog.syslog(syslog.LOG_ERR, process.stdout)
+
+	# iterate through the source snapshots in pairs
+	# if we're missing the destination in the backups, then send the incremental to the backup
+	for a, b in pairwise(sources):
+		if not b in backups:
+			syslog.syslog('zfs-backup incremental %s %s' % (a, b)) 
+			process = subprocess.Popen('zfs send -i %s %s | zfs recv -Fu backup/%s' % (a, b, filesystem), shell = True, stdout = subprocess.PIPE)
+			result = process.wait()
+			if result:
+				syslog.syslog(syslog.LOG_ERR, 'zfs-backup failed with result %s' % result)
+				syslog.syslog(syslog.LOG_ERR, process.stdout)
+
+backup('data')
+backup('storage')
